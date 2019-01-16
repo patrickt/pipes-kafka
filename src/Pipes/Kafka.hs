@@ -2,7 +2,11 @@
 {-# LANGUAGE TemplateHaskell   #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
-module Pipes.Kafka where
+module Pipes.Kafka
+  ( kafkaSink
+  , kafkaSource
+  , kafkaSourceFromConsumer
+  ) where
 
 import           Control.Concurrent        (threadDelay)
 import           Control.Monad             (forever)
@@ -14,6 +18,7 @@ import qualified Data.ByteString           as BS
 
 import           Data.Text                 (pack)
 import           Kafka.Consumer            (ConsumerProperties, ConsumerRecord,
+                                            KafkaConsumer,
                                             Subscription, Timeout (..),
                                             TopicName (..), closeConsumer,
                                             newConsumer, pollMessage)
@@ -56,14 +61,28 @@ kafkaSource ::
   -> Subscription
   -> Timeout
   -> Producer (ConsumerRecord (Maybe BS.ByteString) (Maybe BS.ByteString)) m ()
-kafkaSource props subs timeout@(Timeout timeoutms) =
-  PS.bracket connect release consume
+kafkaSource props subs = makeKafkaProducer connect where
+  connect =  do
+    res <- liftIO $ newConsumer props subs
+    case res of
+      Left err       -> liftIO $ throwM err
+      Right consumer -> pure consumer
+
+-- | Automatically closes the consumer when the pipe is closed.
+kafkaSourceFromConsumer :: (MonadIO m, MonadSafe m, MonadLogger m)
+                        => KafkaConsumer
+                        -> Timeout
+                        -> Producer (ConsumerRecord (Maybe BS.ByteString) (Maybe BS.ByteString)) m ()
+kafkaSourceFromConsumer = makeKafkaProducer . pure
+
+
+makeKafkaProducer :: (MonadIO m, MonadSafe m, MonadLogger m)
+                  => PS.Base m KafkaConsumer
+                  -> Timeout
+                  -> Producer (ConsumerRecord (Maybe BS.ByteString) (Maybe BS.ByteString)) m ()
+makeKafkaProducer given timeout@(Timeout timeoutms) =
+  PS.bracket given release consume
   where
-    connect = do
-      res <- liftIO $ newConsumer props subs
-      case res of
-        Left err       -> liftIO $ throwM err
-        Right consumer -> pure consumer
     release consumer = liftIO $ closeConsumer consumer
     consume consumer =
       forever $ do
@@ -78,6 +97,6 @@ kafkaSource props subs timeout@(Timeout timeoutms) =
           Right m -> P.yield m
     waitForMessages t = do
       lift $ $(logDebug) "waiting for new messages"
-      liftIO . threadDelay $ 1000 * t
+      liftIO . threadDelay $ 1000 * t                
 
 instance MonadLogger m => MonadLogger (PS.SafeT m)
